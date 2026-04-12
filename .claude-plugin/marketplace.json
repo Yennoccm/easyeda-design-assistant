@@ -1,0 +1,44 @@
+{
+  "name": "easyeda-plugins",
+  "owner": {
+    "name": "Mike McConney",
+    "email": "mcconney@gmail.com"
+  },
+  "metadata": {
+    "description": "Electronics design plugins for EasyEDA Standard — circuit design, schematic generation, and PCB preparation",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "easyeda-design-assistant",
+      "source": ".",
+      "description": "End-to-end EasyEDA Standard design assistant — from circuit idea through schematic generation, footprint linking, and PCB preparation. Includes Python scripts for programmatic schematic generation from netlists with LCSC parts.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Mike McConney"
+      },
+      "homepage": "https://github.com/Yennoccm/easyeda-design-assistant",
+      "repository": "https://github.com/Yennoccm/easyeda-design-assistant",
+      "license": "MIT",
+      "keywords": [
+        "easyeda",
+        "pcb",
+        "schematic",
+        "electronics",
+        "footprint",
+        "lcsc",
+        "jlcpcb",
+        "circuit-design",
+        "hardware"
+      ],
+      "category": "engineering",
+      "tags": [
+        "electronics",
+        "hardware",
+        "pcb-design",
+        "easyeda",
+        "schematic-generation"
+      ]
+    }
+  ]
+}
