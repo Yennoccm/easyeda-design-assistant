@@ -1,0 +1,14 @@
+{
+  "title": "Project Name",
+  "description": "Brief project description",
+  "components": {
+    "R1": { "lcsc": "C723553",  "value": "1kΩ" },
+    "C1": { "lcsc": "C1620078", "value": "100nF" },
+    "U1": { "lcsc": "C7236",    "value": "TL072CP" }
+  },
+  "nets": {
+    "VCC":   ["R1.1", "U1.8"],
+    "GND":   ["C1.2", "U1.4"],
+    "SIG_A": ["R1.2", "C1.1"]
+  }
+}

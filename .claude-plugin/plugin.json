@@ -1,0 +1,19 @@
+{
+  "name": "easyeda-design-assistant",
+  "version": "1.0.0",
+  "description": "End-to-end EasyEDA Standard design assistant — from circuit idea through schematic generation, footprint linking, and PCB preparation. Includes Python scripts for programmatic schematic generation from netlists with LCSC parts.",
+  "author": {
+    "name": "Mike McConney"
+  },
+  "keywords": [
+    "easyeda",
+    "pcb",
+    "schematic",
+    "electronics",
+    "footprint",
+    "lcsc",
+    "jlcpcb",
+    "circuit-design",
+    "hardware"
+  ]
+}
