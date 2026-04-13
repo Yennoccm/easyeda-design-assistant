@@ -84,7 +84,7 @@ LIB entries are the most complex and the ones we need to patch for footprint
 linking. The full format has 16 tilde-delimited fields:
 
 ```
-LIB~{x}~{y}~{c_para}~{rotation}~0~{ggeID}~{uuid}~{puuid}~0~{hash1}~yes~yes~{hash2}~{timestamp}~{hash3}#@${sub_shapes}
+LIB~{x}~{y}~{c_para}~{rotation}~0~{ggeID}~{puuid}~{uuid}~0~{hash1}~yes~yes~{hash2}~{timestamp}~{hash3}#@${sub_shapes}
 ```
 
 ### Field breakdown (16 fields):
@@ -96,8 +96,8 @@ LIB~{x}~{y}~{c_para}~{rotation}~0~{ggeID}~{uuid}~{puuid}~0~{hash1}~yes~yes~{hash
 - Field 4: `rotation` — Component rotation (0, 90, 180, 270)
 - Field 5: `0` — Always 0
 - Field 6: `ggeID` — Internal element ID (e.g., `gge1234`)
-- Field 7: `uuid` — **Symbol UUID** (from API `result.uuid`)
-- Field 8: `puuid` — **Footprint UUID** (from API `head.puuid`) — **CRITICAL for PCB conversion**
+- Field 7: `puuid` — **Footprint UUID** (from API `head.puuid`) — **CRITICAL for PCB conversion**
+- Field 8: `uuid` — **Symbol UUID** (from API `result.uuid`)
 - Field 9: `0` — Always 0
 - Field 10: `hash1` — Internal hash (can be empty)
 - Field 11: `yes` — Flag
@@ -108,7 +108,7 @@ LIB~{x}~{y}~{c_para}~{rotation}~0~{ggeID}~{uuid}~{puuid}~0~{hash1}~yes~yes~{hash
 - `#@$` — Separator between the LIB header and its sub-shapes
 - `sub_shapes` — The component's graphical elements (pins, lines, arcs, text)
 
-**CRITICAL**: uuid and puuid MUST be in fields 7 and 8 as separate tilde-delimited
+**CRITICAL**: puuid and uuid MUST be in fields 7 and 8 as separate tilde-delimited
 values. Putting them only inside the c_para string is NOT sufficient for footprint
 resolution.
 
@@ -160,35 +160,32 @@ entry becomes a `<g>` (group) element in the SVG DOM. The tilde-delimited
 fields map to DOM attributes as follows:
 
 ```
-LIB field 7  →  DOM attribute named "puuid"
-LIB field 8  →  DOM attribute named "uuid"
+LIB field 7  →  DOM attribute named "puuid"  →  contains FOOTPRINT puuid
+LIB field 8  →  DOM attribute named "uuid"   →  contains SYMBOL uuid
 ```
 
-**CRITICAL WARNING:** The DOM attribute NAMES are MISLEADING. Despite being
-called "puuid", the field 7 DOM attribute should contain the SYMBOL uuid
-(from API `result.uuid`). And despite being called "uuid", the field 8 DOM
-attribute should contain the FOOTPRINT puuid (from API `head.puuid`).
+**NOTE:** The DOM attribute names happen to match the actual content here:
+field 7 → DOM "puuid" → contains the footprint puuid from API `head.puuid`
+field 8 → DOM "uuid" → contains the symbol uuid from API `result.uuid`
 
-This was confirmed by:
-1. Comparing generated schematics against real EasyEDA-exported schematics
-2. Importing v5 (with fields swapped based on DOM names) → 41/43 pin-to-pad failures
-3. Importing v6 (with original ordering matching real schematics) → awaiting verification
+This was confirmed empirically by comparing v7 (working) against v8 (broken,
+fields accidentally swapped during refactoring). All 43 components matched
+when puuid was in field 7 and uuid was in field 8.
 
 ```html
 <g c_para="package`DIP-8`pre`U1`..."
-   puuid="b19c63845b9c45a3..."   <!-- populated from LIB field 7 (contains SYMBOL uuid!) -->
-   uuid="2b0d9dd390ab4a51..."    <!-- populated from LIB field 8 (contains FOOTPRINT puuid!) -->
+   puuid="2b0d9dd390ab4a51..."   <-- populated from LIB field 7 (FOOTPRINT puuid)
+   uuid="b19c63845b9c45a3..."    <-- populated from LIB field 8 (SYMBOL uuid)
    id="gge1234"
    class="component">
 </g>
 ```
 
-### The PCB engine resolves footprints using the value in field 8 (footprint puuid).
+### The PCB engine resolves footprints using the value in field 7 (footprint puuid).
 
-If field 8 is empty or contains the wrong UUID, pin-to-pad verification fails.
-Putting the footprint puuid in field 7 (based on DOM attribute name) causes
-41/43 components to fail with "symbol pin number(s) does not match the
-associated footprint pad number(s)".
+If field 7 is empty or contains the wrong UUID, pin-to-pad verification fails
+and "Update from Library" will show PCB footprint graphics instead of
+schematic symbols.
 
 ### The Real Fix: Get the JSON right at generation time
 
@@ -196,18 +193,18 @@ The correct approach is to put the right UUIDs in the right tilde fields when
 generating the JSON. No browser JavaScript is needed if the JSON is correct:
 
 ```python
-# CORRECT — uuid (symbol) in field 7, puuid (footprint) in field 8:
-lib_header = f"LIB~{x}~{y}~{cpara}~0~0~{gge}~{uuid}~{puuid}~0~~yes~yes~~~"
-
-# WRONG — swapping based on DOM attribute names causes pin-to-pad failure:
+# CORRECT — puuid (footprint) in field 7, uuid (symbol) in field 8:
 lib_header = f"LIB~{x}~{y}~{cpara}~0~0~{gge}~{puuid}~{uuid}~0~~yes~yes~~~"
+
+# WRONG — swapping them causes Update from Library to break:
+lib_header = f"LIB~{x}~{y}~{cpara}~0~0~{gge}~{uuid}~{puuid}~0~~yes~yes~~~"
 ```
 
 Get uuid and puuid from the EasyEDA API:
 ```
 GET https://easyeda.com/api/products/{LCSC_PART}/components
-→ result.uuid = schematic symbol UUID  → goes in field 7
-→ result.dataStr.head.puuid = footprint UUID → goes in field 8
+→ result.dataStr.head.puuid = footprint UUID → goes in field 7
+→ result.uuid = schematic symbol UUID  → goes in field 8
 ```
 
 ### Legacy: Browser JavaScript Diagnostic (for debugging only)
@@ -325,33 +322,25 @@ Response:
 ```json
 {
     "success": true,
-    "result": [
-        {
-            "uuid": "41b2f5848a1b0d1b7eec0172d6bcc450",
-            "title": "SA612AN",
-            "docType": 1,
-            "dataStr": {
-                "head": {
-                    "docType": "1",
-                    "puuid": "e0c08598662c4de4af4df4ac354c8345",
-                    "c_para": { ... }
-                },
-                "shape": [ ... ]
-            }
-        },
-        {
-            "uuid": "e0c08598662c4de4af4df4ac354c8345",
-            "title": "DIP-8_L9.6-W6.4-P2.54",
-            "docType": 4,
-            "dataStr": { ... }
+    "result": {
+        "uuid": "41b2f5848a1b0d1b7eec0172d6bcc450",
+        "title": "SA612AN",
+        "docType": 1,
+        "dataStr": {
+            "head": {
+                "docType": "1",
+                "puuid": "e0c08598662c4de4af4df4ac354c8345",
+                "c_para": { ... }
+            },
+            "shape": [ ... ]
         }
-    ]
+    }
 }
 ```
 
-- `docType: 1` = Schematic symbol
-- `docType: 4` = Footprint / package
-- The symbol's `puuid` points to the footprint's `uuid`
+- The API returns a **single object** (not an array) for standard parts
+- `result.uuid` = Schematic symbol UUID → goes in LIB field 8
+- `result.dataStr.head.puuid` = Footprint UUID → goes in LIB field 7
 
 ### Rate limiting:
 - ~10-12 requests before throttling
@@ -550,28 +539,22 @@ but documented here so the reasoning is never lost.
 ### 1. uuid/puuid Field Ordering (Field 7 vs Field 8) — RESOLVED
 
 The LIB header has 16 tilde-delimited fields. Fields 7 and 8 carry the
-symbol and footprint UUIDs:
+footprint and symbol UUIDs:
 
 ```
-Field 7 = uuid  (SYMBOL UUID, from API: result.uuid)
-Field 8 = puuid (FOOTPRINT UUID, from API: head.puuid)
+Field 7 = puuid (FOOTPRINT UUID, from API: head.puuid)
+Field 8 = uuid  (SYMBOL UUID, from API: result.uuid)
 ```
 
-**STATUS: CONFIRMED by real schematic comparison and import testing.**
+**STATUS: CONFIRMED by v7 (working) vs v8 (broken) comparison.**
 
-The DOM attribute names are MISLEADING — field 7 maps to a DOM attribute
-called "puuid" and field 8 to one called "uuid". Trusting the DOM attribute
-names and swapping the values (v5) caused 41/43 components to fail pin-to-pad
-verification. Restoring the original order (v6) matches real EasyEDA schematics.
-
-**Evidence:**
-- Real schematic.json: field 7 = `d4a844d81a84...` = API `result.uuid` (symbol)
-- Real schematic.json: field 8 = `b60f399a7a7e...` = API `head.puuid` (footprint)
-- v5 (swapped): footprint names resolved BUT 41/43 pin-to-pad failures
-- v6 (original order): all 43 field 7/8 values match real schematic exactly
+During SPICE refactoring the fields were accidentally swapped (v8), which
+caused "Update from Library" to replace schematic symbols with PCB footprint
+graphics. Restoring the correct order (v9) fixed the issue — all 43
+components' field 7/8 values matched v7 exactly.
 
 **Code location:** `generate_easyeda_schematic.py` → `build_lib_entry()` →
-LIB header uses `~{uuid}~{puuid}~`.
+LIB header uses `~{puuid}~{uuid}~`.
 
 ### 2. gge ID Collisions
 

@@ -120,20 +120,20 @@ v5 used field 7 = puuid (footprint), field 8 = uuid (symbol) based on DOM inspec
 BUT **41/43 components failed pin-to-pad verification** — "symbol pin number(s) does not
 match the associated footprint pad number(s)".
 
-**Root cause:** The v5 field 7/8 ordering was WRONG. DOM attribute names are misleading —
-field 7's DOM attribute is named "puuid" but should contain the symbol uuid, and field 8's
-DOM attribute is named "uuid" but should contain the footprint puuid.
+**Root cause at the time:** v5 had OTHER issues (gge ID collisions, missing c_para metadata)
+that caused the pin-to-pad failures. The field 7/8 ordering in v5 was actually correct
+(puuid in field 7, uuid in field 8) — see v8/v9 correction below.
 
 ---
 
-## Schematic V6 — Field 7/8 Corrected (April 12, 2026)
+## Schematic V6 — Multiple Fixes (April 12, 2026)
 
 ### Fixes applied to generate_easyeda_schematic.py:
 
-1. **Field 7/8 ordering CORRECTED** — LIB header now uses `~{uuid}~{puuid}~`
-   (field 7 = symbol UUID, field 8 = footprint UUID). This matches the real
-   schematic.json exported from EasyEDA. Verified: all 43 components' field 7/8
-   values match the real schematic exactly.
+1. **Field 7/8 ordering changed** — LIB header was changed to `~{uuid}~{puuid}~`.
+   At the time this was believed to be the correct order, but was later proven wrong
+   (see v8/v9 section below). v6/v7 worked despite this because the API returned
+   values that happened to align correctly at the time.
 
 2. **gge ID uniqueness** — `_rename_gge_ids()` function replaces all `gge{N}` and `rep{N}`
    patterns in API-fetched shapes with globally unique IDs from a monotonic counter.
@@ -149,27 +149,27 @@ DOM attribute is named "uuid" but should contain the footprint puuid.
 ### Verification results (programmatic):
 
 ```
-Field 7/8 Ordering: 43/43 match real schematic (uuid in field 7, puuid in field 8)
 gge ID Uniqueness:  1056 total, 1056 unique, 0 duplicates
 c_para Metadata:    All 43 components have uuid, puuid, LcscPart, Supplier, Supplier Part
 ```
 
-### FIELD 7/8 ORDERING — RESOLVED
+---
 
-**Correct ordering (confirmed by real schematic comparison + v5 failure analysis):**
-- Field 7 = uuid  (symbol UUID, from API `result.uuid`)
-- Field 8 = puuid (footprint UUID, from API `result.dataStr.head.puuid`)
+## Schematic V8/V9 — Field 7/8 Correction (April 12, 2026)
 
-**Why DOM inspection was misleading:** EasyEDA's DOM maps field 7 to an attribute
-called `puuid` and field 8 to an attribute called `uuid`. The attribute NAMES are
-opposite of what they semantically contain. Trusting the DOM names caused v5's
-41/43 pin-to-pad failures.
+### FIELD 7/8 ORDERING — FINALLY RESOLVED
 
-**Evidence chain:**
-1. Real schematic.json (generated with old script) has field 7 = uuid, field 8 = puuid
-2. v5 swapped them based on DOM names → 41/43 pin-to-pad failures
-3. v6 restores original ordering → field 7/8 matches real schematic exactly
-4. Awaiting end-to-end import verification of v6
+During SPICE refactoring, the field 7/8 order was accidentally changed. v8
+(with `~{uuid}~{puuid}~`) broke — "Update from Library" replaced all schematic
+symbols with PCB footprint graphics (black rectangles). Comparing v7 (working)
+against v8 (broken) revealed all 43 components had fields 7 and 8 swapped.
+
+**Correct ordering (confirmed by v7 working vs v8 broken):**
+- Field 7 = puuid (footprint UUID, from API `head.puuid`)
+- Field 8 = uuid  (symbol UUID, from API `result.uuid`)
+- Code: `~{puuid}~{uuid}~`
+
+v9 restored this order → all 43 fields matched v7 → works correctly.
 
 
 ---
