@@ -205,14 +205,13 @@ PAD information for every component, and pin-to-pad verification fails across th
 After importing the schematic JSON:
 
 1. Go to **Design → Update Components from Library**
-2. Check the box: **"Check component latest version when open schematic"**
-3. Click the **header checkbox** to select all components in the list
-4. **CRITICAL: Check ONLY the "Footprint" (or "Package") column checkbox.**
+2. In the dialog that opens, click the **header checkbox** to select all components in the list
+3. **CRITICAL: Check ONLY the "Footprint" (or "Package") column checkbox.**
    Do NOT check the "Symbol" column. If you update the symbol, EasyEDA will
    replace your schematic symbols with PCB footprint graphics (black rectangles)
    for any part whose library entry uses the footprint as its primary shape.
-5. Click **Update**
-6. Click **OK** on the warning dialog about flipped/mirrored components
+4. Click **Update**
+5. Click **OK** on the warning dialog about flipped/mirrored components
 
 This forces EasyEDA to fetch the footprint data from its server for every
 component in one batch operation (~10 seconds), without overwriting the

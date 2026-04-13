@@ -242,20 +242,19 @@ fail Footprint Verification (the PAD information column will be completely empty
 **Tell the user to do this immediately after import:**
 
 1. Go to **Design → Update Components from Library**
-2. Check the box: **"Check component latest version when open schematic"**
-3. Click **Select All** to select all components in the list
-4. **CRITICAL: Check ONLY the "Footprint" (or "Package") column checkbox.**
+2. In the dialog that opens, click the **header checkbox** to select all components in the list
+3. **CRITICAL: Check ONLY the "Footprint" (or "Package") column checkbox.**
    Do NOT check the "Symbol" column. Updating the symbol will replace schematic
    symbols with PCB footprint graphics (black rectangles) for parts whose library
    entry uses the footprint as its primary shape.
-5. Click **Update**
-6. Click **OK** on the warning dialog about flipped/mirrored components
+4. Click **Update**
+5. Click **OK** on the warning dialog about flipped/mirrored components
 
 This fetches the footprint data from EasyEDA's server for every component in one
 batch operation. Takes about 10 seconds. The schematic symbols remain intact.
 
 **⚠ WARNING:** If "Select All columns" or the "Symbol" column is checked, EasyEDA
-overwrites schematic symbols. Many LCSC parts store the PCB footprint as their
+owerwrites schematic symbols. Many LCSC parts store the PCB footprint as their
 primary library shape, causing the schematic to show black footprint rectangles
 instead of proper symbols. Only update Footprint/Package.
 
@@ -296,7 +295,7 @@ automatically — if they're not showing, check that the LIB entries contain
 `T~P~...~{designator}~1~start~...~pinpart` sub-shapes.
 
 ### "Flags point the wrong direction"
-Flag rotation should be 180 degrees opposite to the pin extension direction. If a pin
+Flag rotation should be 180° opposite to the pin extension direction. If a pin
 extends right (rot=0), the flag at the end of the stub wire should point left
 (rot=180) back toward the pin.
 
