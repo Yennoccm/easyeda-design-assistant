@@ -102,29 +102,36 @@ FLAG_OFFSET = 30    # stub wire length from pin to flag
 #   X = Subcircuit (ICs, op-amps, regulators, etc.)
 
 # Map designator prefix → (spicePre, spiceSymbolName)
-# NOTE: SPICE fields are currently disabled until a safe integration approach
-# is finalized. These fields were causing issues during schematic-to-PCB
-# conversion and require further testing and validation.
+# Only passives that have built-in EasyEDA SPICE models are included.
 SPICE_PASSIVE_MAP = {
-    # "R":  ("R", "Resistor"),
-    # "C":  ("C", "Capacitor"),
-    # "L":  ("L", "Inductor"),
-    # "D":  ("D", "Diode"),
+    "R":  ("R", "Resistor"),
+    "C":  ("C", "Capacitor"),
+    "L":  ("L", "Inductor"),
+    "D":  ("D", "Diode"),
 }
 
 # Default simulation directives embedded in the head field.
 # Format: "TRAN`tstep`tstop`tstart`{AC`type`npoints`fstart`fstop`{DC`src``start`stop`{TF`src``"
-# NOTE: c_spiceCmd is currently disabled until SPICE integration is safer.
-DEFAULT_SPICE_CMD = None  # Was: "TRAN`1u`10m`0`{AC`dec`10`1`1Meg`{DC`0``0`0`{TF```"
+# This sets up a 10ms transient analysis with 1us steps — good for
+# catching basic wiring errors like shorted rails or floating nodes.
+DEFAULT_SPICE_CMD = "TRAN`1u`10m`0`{AC`dec`10`1`1Meg`{DC`0``0`0`{TF```"
 
 
 def get_spice_info(designator: str) -> tuple:
     """Return (spicePre, spiceSymbolName) for a designator, or (None, None).
 
-    Currently returns (None, None) for all designators — SPICE fields
-    are disabled until a safe integration approach is finalized.
+    Only returns SPICE info for passive components that have built-in
+    EasyEDA simulation models. ICs and complex parts return (None, None)
+    and would need third-party .subckt models injected separately (Path 2).
     """
-    return (None, None)
+    # Extract the letter prefix from the designator (e.g. "R1" → "R", "C15" → "C")
+    prefix = ""
+    for ch in designator:
+        if ch.isalpha():
+            prefix += ch
+        else:
+            break
+    return SPICE_PASSIVE_MAP.get(prefix, (None, None))
 
 
 # Unique ID counter
@@ -292,475 +299,749 @@ def offset_shape(shape_str: str, dx: float, dy: float) -> str:
         return _offset_text(shape_str, dx, dy)
     elif shape_str.startswith("A~"):
         return _offset_arc(shape_str, dx, dy)
-    elif shape_str.startswith("E~"):
-        return _offset_ellipse(shape_str, dx, dy)
     return shape_str
 
 
 def _offset_pin(s: str, dx: float, dy: float) -> str:
-    """Offset a P~ (pin) shape."""
+    """Offset all coordinates in a pin shape."""
     sections = s.split("^^")
-    header = sections[0].split("~")
+    new_sections = []
 
-    if len(header) >= 6:
-        header[4] = str(snap10(float(header[4]) + dx))
-        header[5] = str(snap10(float(header[5]) + dy))
+    for i, section in enumerate(sections):
+        if i == 0:
+            # Header: P~show~type~num~X~Y~rot~id~0
+            fields = section.split("~")
+            if len(fields) >= 6:
+                fields[4] = str(int(float(fields[4]) + dx))
+                fields[5] = str(int(float(fields[5]) + dy))
+            new_sections.append("~".join(fields))
+        elif i == 1:
+            # Pin endpoint: X~Y
+            fields = section.split("~")
+            if len(fields) >= 2:
+                fields[0] = str(int(float(fields[0]) + dx))
+                fields[1] = str(int(float(fields[1]) + dy))
+            new_sections.append("~".join(fields))
+        elif i == 2:
+            # SVG path
+            new_sections.append(_offset_svg_path(section, dx, dy))
+        else:
+            # Label/marker sections
+            fields = section.split("~")
+            if len(fields) >= 3 and fields[0] in ("0", "1"):
+                try:
+                    fields[1] = str(int(float(fields[1]) + dx))
+                    fields[2] = str(int(float(fields[2]) + dy))
+                    new_sections.append("~".join(fields))
+                except ValueError:
+                    new_sections.append(_offset_svg_path(section, dx, dy))
+            else:
+                new_sections.append(_offset_svg_path(section, dx, dy))
 
-    result = "~".join(header)
-    for sec in sections[1:]:
-        result += "^^" + sec
+    return "^^".join(new_sections)
+
+
+def _offset_svg_path(s: str, dx: float, dy: float) -> str:
+    def replace_coords(match):
+        cmd = match.group(1)
+        x = int(float(match.group(2)) + dx)
+        y = int(float(match.group(3)) + dy)
+        sep = "," if "," in match.group(0) else " "
+        return f"{cmd}{sep}{x}{sep}{y}" if sep == "," else f"{cmd} {x} {y}"
+
+    result = re.sub(r'([ML])\s*(\-?\d+(?:\.\d+)?)[,\s]+(\-?\d+(?:\.\d+)?)', replace_coords, s)
     return result
 
 
 def _offset_polyline(s: str, dx: float, dy: float) -> str:
-    """Offset a PL~ (polyline) shape."""
-    parts = s.split("~")
-    if len(parts) < 2:
-        return s
-
-    # Extract coordinate portion (part 1) and rest (parts 2+)
-    coords = parts[1]
-    rest = "~".join(parts[2:])
-
-    # Parse and offset coordinates
-    coords_list = coords.split(" ")
-    offset_coords = []
-    for i, c in enumerate(coords_list):
-        try:
-            val = float(c)
-            if i % 2 == 0:
-                offset_coords.append(str(snap10(val + dx)))
-            else:
-                offset_coords.append(str(snap10(val + dy)))
-        except ValueError:
-            offset_coords.append(c)
-
-    return "PL~" + " ".join(offset_coords) + "~" + rest
+    fields = s.split("~")
+    if len(fields) >= 2:
+        coords = fields[1].split(" ")
+        new_coords = []
+        for i in range(0, len(coords) - 1, 2):
+            try:
+                new_coords.append(str(int(float(coords[i]) + dx)))
+                new_coords.append(str(int(float(coords[i + 1]) + dy)))
+            except (ValueError, IndexError):
+                new_coords.extend(coords[i:i+2])
+        fields[1] = " ".join(new_coords)
+    return "~".join(fields)
 
 
 def _offset_rectangle(s: str, dx: float, dy: float) -> str:
-    """Offset a R~ (rectangle) shape."""
-    parts = s.split("~")
-    if len(parts) >= 4:
-        parts[1] = str(snap10(float(parts[1]) + dx))
-        parts[2] = str(snap10(float(parts[2]) + dy))
-    return "~".join(parts)
+    fields = s.split("~")
+    if len(fields) >= 3:
+        try:
+            fields[1] = str(int(float(fields[1]) + dx))
+            fields[2] = str(int(float(fields[2]) + dy))
+        except ValueError:
+            pass
+    return "~".join(fields)
 
 
 def _offset_text(s: str, dx: float, dy: float) -> str:
-    """Offset a T~ (text) shape."""
-    parts = s.split("~")
-    if len(parts) >= 3:
-        parts[1] = str(snap10(float(parts[1]) + dx))
-        parts[2] = str(snap10(float(parts[2]) + dy))
-    return "~".join(parts)
+    fields = s.split("~")
+    if len(fields) >= 3:
+        try:
+            fields[1] = str(int(float(fields[1]) + dx))
+            fields[2] = str(int(float(fields[2]) + dy))
+        except ValueError:
+            pass
+    return "~".join(fields)
 
 
 def _offset_arc(s: str, dx: float, dy: float) -> str:
-    """Offset an A~ (arc) shape."""
-    parts = s.split("~")
-    if len(parts) >= 3:
-        parts[1] = str(snap10(float(parts[1]) + dx))
-        parts[2] = str(snap10(float(parts[2]) + dy))
-    return "~".join(parts)
+    fields = s.split("~")
+    if len(fields) >= 3:
+        try:
+            fields[1] = str(int(float(fields[1]) + dx))
+            fields[2] = str(int(float(fields[2]) + dy))
+        except ValueError:
+            pass
+    return "~".join(fields)
 
 
-def _offset_ellipse(s: str, dx: float, dy: float) -> str:
-    """Offset an E~ (ellipse) shape."""
-    parts = s.split("~")
-    if len(parts) >= 3:
-        parts[1] = str(snap10(float(parts[1]) + dx))
-        parts[2] = str(snap10(float(parts[2]) + dy))
-    return "~".join(parts)
+def _rename_gge_ids(s: str) -> str:
+    """Replace all gge/rep IDs in a shape string with globally unique ones.
 
+    EasyEDA requires every element to have a unique gge ID across the entire
+    schematic. API-fetched symbols reuse IDs like gge26, rep2, rep3 — when
+    the same LCSC part is used for multiple components (e.g. 19 resistors
+    sharing C17414), those IDs collide and break footprint verification.
 
-# ── Build gge Renaming Functions ──────────────────────────────────────
-
-def _build_gge_map(shapes: list) -> dict:
-    """Build a mapping from old gge IDs to new unique ones."""
-    mapping = {}
-    pattern = re.compile(r"(gge\d+|rep\d+)")
-
-    for shape in shapes:
-        if not isinstance(shape, str):
-            continue
-        for match in pattern.finditer(shape):
-            old_id = match.group(1)
-            if old_id not in mapping:
-                mapping[old_id] = next_gge()
-
-    return mapping
-
-
-def _rename_gge_ids(shapes: list, mapping: dict) -> list:
-    """Rename all gge IDs in shapes according to the mapping."""
-    new_shapes = []
-    pattern = re.compile(r"(gge\d+|rep\d+)")
-
-    for shape in shapes:
-        if not isinstance(shape, str):
-            new_shapes.append(shape)
-            continue
-        new_shape = pattern.sub(lambda m: mapping.get(m.group(1), m.group(1)), shape)
-        new_shapes.append(new_shape)
-
-    return new_shapes
-
-
-# ── c_para String Building ────────────────────────────────────────────
-
-def build_cpara_string(designator: str, lcsc_part: str, uuid: str, puuid: str,
-                       package: str, value: str = "") -> str:
-    """Build a backtick-delimited c_para string for a component.
-
-    The c_para string holds component metadata that persists when the
-    schematic is exported and re-imported. Essential fields:
-      - pre: designator (R1, C5, U2, etc.)
-      - uuid: symbol UUID (for Properties dialog round-trip)
-      - puuid: footprint UUID (for BOM and linking)
-      - LcscPart: LCSC part number (for JLCPCB ordering)
-      - package: footprint name (R0805, SOT-223, SSOP-24, etc.)
-      - Supplier: supplier name (usually LCSC)
-      - SupplierPart: supplier part number
+    This function finds all occurrences of gge{N}, rep{N}, and flag_gge{N}
+    patterns and replaces each unique one with a fresh global ID.
     """
-    parts = []
+    import re as _re
+    id_map = {}
 
-    # Standard order
-    parts.append(f"pre`{designator}")
+    def replacer(match):
+        old_id = match.group(0)
+        if old_id not in id_map:
+            id_map[old_id] = next_gge()
+        return id_map[old_id]
 
-    if package:
-        parts.append(f"package`{package}")
-    if value:
-        parts.append(f"Value`{value}")
-
-    # UUID fields
-    if uuid:
-        parts.append(f"uuid`{uuid}")
-    if puuid:
-        parts.append(f"puuid`{puuid}")
-
-    # Supplier info
-    if lcsc_part:
-        parts.append(f"LcscPart`{lcsc_part}")
-        parts.append(f"Supplier`LCSC")
-        parts.append(f"SupplierPart`{lcsc_part}")
-
-    return "`".join(parts) + "`"
+    return _re.sub(r'(?:flag_)?(?:gge|rep)\d+[a-f0-9]*', replacer, s)
 
 
-# ── LIB Entry Building ────────────────────────────────────────────────
+# ── Net Flag Generation (F~ format) ───────────────────────────────────
+# Real EasyEDA format learned from exported schematics:
+#
+# F~part_netLabel_netPort~X~Y~ROTATION~ggeID~~0
+#   ^^X~Y
+#   ^^NET_NAME~#0000FF~labelX~labelY~labelRot~~1~Times New Roman~8pt~flag_ggeID
+#   ^^PL~polyline_coords~#0000FF~1~0~transparent~ggeID~0
+#
+# The polyline draws an arrow/pentagon shape pointing toward the connection.
+# Shape varies by rotation.
 
-def build_lib_entry(designator: str, lcsc_part: str, x: float, y: float,
-                    api_data: dict) -> tuple:
-    """Build a complete LIB entry for a component placed at (x, y).
+def make_flag_label(net_name: str, endpoint_count: int) -> str:
+    if endpoint_count <= 2:
+        return net_name
+    return f"{net_name}:{endpoint_count}"
 
-    Returns (lib_str, pinout_dict) where pinout_dict maps pin_number → (px, py)
-    for later wire generation.
 
-    The LIB format has 16 tilde-delimited fields:
-      0: LIB (type prefix)
-      1: x (position)
-      2: y (position)
-      3: c_para (backtick-delimited metadata string)
-      4: rotation (0, 90, 180, 270)
-      5: 0 (always)
-      6: ggeID (element identifier)
-      7: puuid (FOOTPRINT UUID) — CRITICAL
-      8: uuid (SYMBOL UUID) — CRITICAL
-      9: 0 (always)
-      10-15: hash and timestamp fields (usually empty)
-      #@$: separator
-      sub-shapes: pin, line, arc, text, etc.
+def _flag_polyline(x, y, rotation, size=15):
     """
-    if "error" in api_data:
-        return "", {}
+    Generate the polyline coordinates for a netPort flag arrow shape.
+    Based on real EasyEDA flag shapes at different rotations.
+    Size controls the flag length (default 15 units).
+    """
+    s = size
+    hs = s // 3  # half-width of the arrow head
 
-    x = snap10(x)
-    y = snap10(y)
+    if rotation == 0:
+        # Arrow pointing right → flag body extends left
+        # PL~X Y X-hs Y+hs X-s Y+hs X-s Y-hs X-hs Y-hs X Y
+        return f"{x} {y} {x-hs} {y+hs} {x-s} {y+hs} {x-s} {y-hs} {x-hs} {y-hs} {x} {y}"
+    elif rotation == 180:
+        # Arrow pointing left → flag body extends right
+        return f"{x} {y} {x+hs} {y-hs} {x+s} {y-hs} {x+s} {y+hs} {x+hs} {y+hs} {x} {y}"
+    elif rotation == 90:
+        # Arrow pointing up → flag body extends down
+        return f"{x} {y} {x+hs} {y+hs} {x+hs} {y+s} {x-hs} {y+s} {x-hs} {y+hs} {x} {y}"
+    elif rotation == 270:
+        # Arrow pointing down → flag body extends up
+        return f"{x} {y} {x-hs} {y-hs} {x-hs} {y-s} {x+hs} {y-s} {x+hs} {y-hs} {x} {y}"
+    else:
+        # Default: right-pointing
+        return f"{x} {y} {x-hs} {y+hs} {x-s} {y+hs} {x-s} {y-hs} {x-hs} {y-hs} {x} {y}"
 
-    uuid = api_data.get("uuid", "")
-    puuid = api_data.get("puuid", "")
-    package = api_data.get("package", "")
-    shapes = api_data.get("shapes", [])
-    pins = api_data.get("pins", [])
-    origin_x = api_data.get("origin_x", 0)
-    origin_y = api_data.get("origin_y", 0)
-    c_para_dict = api_data.get("c_para", {})
 
-    # Calculate component offset
-    dx = x - origin_x
-    dy = y - origin_y
+def _flag_label_position(x, y, rotation, size=15):
+    """Calculate label text position based on flag rotation.
 
-    # Build c_para string
-    cpara_str = build_cpara_string(designator, lcsc_part, uuid, puuid, package)
+    The label sits on the BODY side of the flag (opposite the arrow tip).
+    After the rotation fix, flag rotation 180 means arrow points left
+    (body extends right), so label goes to the right.
+    """
+    s = size
+    if rotation == 0:    # arrow right, body left → label left of body
+        return x - s - 8, y + 4, 0
+    elif rotation == 180: # arrow left, body right → label right of body
+        return x + s + 8, y + 4, 0
+    elif rotation == 90:  # arrow up, body down → label below body
+        return x + 8, y + s + 8, 0
+    elif rotation == 270: # arrow down, body up → label above body
+        return x + 8, y - s - 8, 0
+    return x - s - 8, y + 4, 0
 
-    # Offset and rename gge IDs in shapes
-    offset_shapes = [offset_shape(s, dx, dy) for s in shapes]
-    gge_map = _build_gge_map(offset_shapes)
-    renamed_shapes = _rename_gge_ids(offset_shapes, gge_map)
 
-    # Build sub-shapes string
-    sub_shapes = "#@$" + "#@$".join(renamed_shapes)
+def make_net_flag(x: float, y: float, rotation: int, label: str) -> str:
+    """
+    Generate an EasyEDA net flag (F~ shape) at the given position.
+    Uses part_netLabel_netPort for custom signal nets.
+    """
+    x, y = int(x), int(y)
+    gge_main = next_gge()
+    gge_flag = next_flag_gge()
+    gge_pl = next_gge()
 
-    # Get component gge ID
-    comp_gge = next_gge()
+    pl_coords = _flag_polyline(x, y, rotation)
+    lx, ly, lrot = _flag_label_position(x, y, rotation)
 
-    # Calculate pinout (absolute coordinates on canvas)
-    pinout = {}
-    for pin in pins:
-        pin_num = pin["pin_number"]
-        px = pin["x"] + dx
-        py = pin["y"] + dy
-        px = snap10(px)
-        py = snap10(py)
-        pinout[pin_num] = (px, py)
-
-    # Build LIB header (16 fields)
-    lib_header = (
-        f"LIB~{int(x)}~{int(y)}~{cpara_str}~0~0~{comp_gge}~{puuid}~{uuid}~0~~yes~yes~~~"
+    flag_str = (
+        f"F~part_netLabel_netPort~{x}~{y}~{rotation}~{gge_main}~~0"
+        f"^^{x}~{y}"
+        f"^^{label}~#0000FF~{lx}~{ly}~{lrot}~~1~Times New Roman~8pt~{gge_flag}"
+        f"^^PL~{pl_coords}~#0000FF~1~0~transparent~{gge_pl}~0"
     )
-
-    lib_entry = lib_header + sub_shapes
-
-    return lib_entry, pinout
+    return flag_str
 
 
-# ── Wire and Net Flag Building ────────────────────────────────────────
+def make_gnd_flag(x: float, y: float, rotation: int, label: str = "GND") -> str:
+    """Generate a GND power flag with the standard ground symbol.
 
-def make_wire(p1: tuple, p2: tuple) -> str:
-    """Create a W~ (wire) shape connecting two points.
-
-    Wire format: W~x1 y1 x2 y2~color~width~0~style~ggeID~0
+    Real EasyEDA GND flags have 5 PL entries: 1 stem + 4 bars of decreasing width.
+    Pattern from real export (rotation=90, pointing right):
+      PL stem:  10px from x to bar start
+      PL bar1:  ±9 (18px wide)
+      PL bar2:  ±6 (12px wide)  (+2 offset)
+      PL bar3:  ±3 (6px wide)   (+4 offset)
+      PL bar4:  ±1 (2px wide)   (+6 offset)
     """
-    x1, y1 = int(snap10(p1[0])), int(snap10(p1[1]))
-    x2, y2 = int(snap10(p2[0])), int(snap10(p2[1]))
-    gge = next_gge()
-    return f"W~{x1} {y1} {x2} {y2}~#008800~1~0~none~{gge}~0"
+    x, y = int(x), int(y)
+    gge_main = next_gge()
+    gge_flag = next_flag_gge()
+
+    shapes = []
+    if rotation == 90:  # flag points right, bars extend right
+        bx = x + 10
+        shapes.append(f"PL~{bx} {y} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx} {y-9} {bx} {y+9}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx+2} {y-6} {bx+2} {y+6}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx+4} {y-3} {bx+4} {y+3}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx+6} {y-1} {bx+6} {y+1}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x + 18, y + 4, 0
+    elif rotation == 270:  # flag points left, bars extend left
+        bx = x - 10
+        shapes.append(f"PL~{bx} {y} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx} {y-9} {bx} {y+9}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx-2} {y-6} {bx-2} {y+6}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx-4} {y-3} {bx-4} {y+3}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{bx-6} {y-1} {bx-6} {y+1}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 22, y + 4, 0
+    elif rotation == 0:  # flag points down, bars extend down
+        by = y + 10
+        shapes.append(f"PL~{x} {by} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-9} {by} {x+9} {by}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-6} {by+2} {x+6} {by+2}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-3} {by+4} {x+3} {by+4}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-1} {by+6} {x+1} {by+6}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 5, y + 27, 0
+    else:  # 180, flag points up, bars extend up
+        by = y - 10
+        shapes.append(f"PL~{x} {by} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-9} {by} {x+9} {by}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-6} {by-2} {x+6} {by-2}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-3} {by-4} {x+3} {by-4}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-1} {by-6} {x+1} {by-6}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 5, y - 27, 0
+
+    pl_section = "^^".join(shapes)
+
+    flag_str = (
+        f"F~part_netLabel_gnD~{x}~{y}~{rotation}~{gge_main}~~0"
+        f"^^{x}~{y}"
+        f"^^{label}~#000000~{lx}~{ly}~{lrot}~start~1~Times New Roman~9pt~{gge_flag}"
+        f"^^{pl_section}"
+    )
+    return flag_str
 
 
-def make_net_flag(net_name: str, x: float, y: float, net_count: int = 0) -> str:
-    """Create an F~ (net flag) shape for a net connection point.
+def make_vcc_flag(x: float, y: float, rotation: int, label: str = "VCC") -> str:
+    """Generate a VCC power flag with the standard bar symbol."""
+    x, y = int(x), int(y)
+    gge_main = next_gge()
+    gge_flag = next_flag_gge()
 
-    Net flags use the NETNAME:N convention:
-      - Exactly 2 endpoints: label = NETNAME
-      - 3+ endpoints: label = NETNAME:N (where N = endpoint count)
-    """
-    x = snap10(x)
-    y = snap10(y)
+    shapes = []
+    if rotation == 90:  # bar to the left
+        bx = x - 10
+        shapes.append(f"PL~{bx} {y} {x} {y}~#000000~1~0~none~{next_gge()}~0")
+        shapes.append(f"PL~{bx} {y-5} {bx} {y+5}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 20, y + 4, 0
+    elif rotation == 0:  # bar above
+        by = y - 10
+        shapes.append(f"PL~{x} {by} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-5} {by} {x+5} {by}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 10, y - 15, 0
+    else:  # default: bar above
+        by = y - 10
+        shapes.append(f"PL~{x} {by} {x} {y}~#000000~1~0~transparent~{next_gge()}~0")
+        shapes.append(f"PL~{x-5} {by} {x+5} {by}~#000000~1~0~transparent~{next_gge()}~0")
+        lx, ly, lrot = x - 10, y - 15, 0
 
-    label = net_name
-    if net_count > 2:
-        label = f"{net_name}:{net_count}"
+    pl_section = "^^".join(shapes)
 
-    gge = next_gge()
-    flag_gge = next_flag_gge()
-
-    flag_type = "part_netLabel_netPort"
-    if label.upper() in ["GND", "VSS", "GROUND"]:
-        flag_type = "part_netLabel_gnD"
-    elif label.upper() in ["VCC", "VDD", "3V3", "5V"]:
-        flag_type = "part_netLabel_VCC"
-
-    # Minimal F~ entry with position and label
-    return f"F~{flag_type}~{int(x)}~{int(y)}~0~{gge}~~0^^{int(x)}~{int(y)}^^{label}~#0000FF~{int(x-30)}~{int(y)}~0~~1~Times New Roman~8pt~{flag_gge}"
+    flag_str = (
+        f"F~part_netLabel_VCC~{x}~{y}~{rotation}~{gge_main}~~0"
+        f"^^{x}~{y}"
+        f"^^{label}~#000000~{lx}~{ly}~{lrot}~start~1~Times New Roman~9pt~{gge_flag}"
+        f"^^{pl_section}"
+    )
+    return flag_str
 
 
 def make_nc_marker(x: float, y: float) -> str:
-    """Create an NC (no connect) marker for an unconnected pin.
+    """Generate a No Connect (X) marker at the given pin endpoint.
 
-    Format: O~x~y~ggeID~path~color~0
-    The path draws an X: diagonals from (x-4,y-4) to (x+4,y+4) and vice versa
+    Format learned from real EasyEDA schematics:
+      O~X~Y~ggeID~M (X-4) (Y-4) L (X+4) (Y+4) M (X+4) (Y-4) L (X-4) (Y+4)~#33cc33~0
+
+    The marker draws a green X (two diagonal lines, 8px wide) centered on
+    the pin endpoint, telling EasyEDA's DRC that the pin is intentionally
+    left unconnected.
     """
-    x = snap10(x)
-    y = snap10(y)
+    x, y = int(x), int(y)
+    gge = next_gge()
+    return (
+        f"O~{x}~{y}~{gge}"
+        f"~M {x-4} {y-4} L {x+4} {y+4} M {x+4} {y-4} L {x-4} {y+4}"
+        f"~#33cc33~0"
+    )
+
+
+def make_wire(x1, y1, x2, y2):
+    """Generate a wire shape string.
+    Format: W~points~#color~strokeWidth~strokeStyle~fillColor~ggeID~locked
+    NO snapping — coordinates must exactly match pin/flag positions.
+    Symbols may use a 5px internal grid, and snapping creates connection gaps."""
+    gge = next_gge()
+    return f"W~{int(x1)} {int(y1)} {int(x2)} {int(y2)}~#008800~1~0~none~{gge}~0"
+
+
+# ── Component Placement ───────────────────────────────────────────────
+
+def calculate_grid_position_ic(index: int, y_start: int) -> tuple:
+    """Grid position for ICs (3+ pins) — wider spacing."""
+    col = index % GRID_COLS_IC
+    row = index // GRID_COLS_IC
+    x = snap10(GRID_START_X + col * GRID_SPACING_IC_X)
+    y = snap10(y_start + row * GRID_SPACING_IC_Y)
+    return x, y
+
+
+def calculate_grid_position_passive(index: int, y_start: int) -> tuple:
+    """Grid position for passives (2-pin) — tighter spacing."""
+    col = index % GRID_COLS_PASSIVE
+    row = index // GRID_COLS_PASSIVE
+    x = snap10(GRID_START_X + col * GRID_SPACING_PASSIVE_X)
+    y = snap10(y_start + row * GRID_SPACING_PASSIVE_Y)
+    return x, y
+
+
+def get_flag_position(pin_x, pin_y, pin_rotation):
+    """Calculate flag position and rotation from a pin.
+
+    The flag is placed at the end of a stub wire extending from the pin.
+    The flag's arrow/symbol should point TOWARD the pin (back toward
+    the component), so the flag rotation is 180° opposite to the
+    direction we extend.
+
+    Pin rotation convention:
+      0   = pin extends right (dot is right of body)
+      90  = pin extends up (dot is above body)
+      180 = pin extends left (dot is left of body)
+      270 = pin extends down (dot is below body)
+
+    Flag rotation convention:
+      0   = arrow points right, body extends left
+      90  = arrow points up, body extends down
+      180 = arrow points left, body extends right
+      270 = arrow points down, body extends up
+
+    So if pin extends RIGHT, flag is further right, and flag should
+    point LEFT (rotation=180) back toward the pin.
+    """
+    offset = FLAG_OFFSET
+    # NO snapping — flag position must maintain a straight wire from the pin.
+    # Symbols may have pins on a 5px grid, and snapping would create a 5px gap.
+    if pin_rotation == 0:    # pin extends right → flag further right, points left
+        return int(pin_x + offset), int(pin_y), 180
+    elif pin_rotation == 90:  # pin extends up → flag further up, points down
+        return int(pin_x), int(pin_y - offset), 270
+    elif pin_rotation == 180: # pin extends left → flag further left, points right
+        return int(pin_x - offset), int(pin_y), 0
+    elif pin_rotation == 270: # pin extends down → flag further down, points up
+        return int(pin_x), int(pin_y + offset), 90
+    return int(pin_x + offset), int(pin_y), 180
+
+
+# ── LIB Entry Assembly ────────────────────────────────────────────────
+# Real format from EasyEDA exports:
+# LIB~X~Y~c_para~ROTATION~0~ggeID~uuid~puuid~0~??~yes~yes~??~num
+#   #@$sub_shape1#@$sub_shape2...
+
+def build_cpara_string(designator: str, value: str, comp_data: dict,
+                       lcsc_part: str = "") -> str:
+    """Build the backtick-delimited c_para string.
+
+    Includes uuid, puuid, LCSC metadata, and SPICE simulation fields so that:
+      - EasyEDA's Properties dialog shows supplier info
+      - BOM export includes LCSC part numbers (critical for JLCPCB ordering)
+      - JSON round-trip export/import preserves linkage data
+      - SPICE simulation can run on passive components (R, C, L, D)
+    """
+    parts = []
+
+    if comp_data.get("package"):
+        parts.extend(["package", comp_data["package"]])
+
+    parts.extend(["pre", designator])
+
+    if value:
+        parts.extend(["Value", value])
+        parts.extend(["nameAlias", "Value"])
+
+    # Copy relevant fields from API c_para
+    api_cpara = comp_data.get("c_para", {})
+    for key in ("Supplier", "Supplier Part", "Manufacturer", "Manufacturer Part",
+                "JLCPCB Part Class"):
+        if key in api_cpara:
+            parts.extend([key, api_cpara[key]])
+
+    # ── SPICE simulation fields (DISABLED) ─────────────────────────────
+    # Adding spicePre/spiceSymbolName to c_para causes "Update from Library"
+    # to resolve the SPICE Symbol version instead of the Schematic Symbol,
+    # replacing schematic symbols with PCB footprint graphics.
+    # TODO: Re-enable once we find a way to add SPICE fields AFTER footprint
+    # linking, or find a SPICE approach that doesn't break Update from Library.
+    # See: https://github.com/Yennoccm/easyeda-design-assistant
+
+    # Inject uuid/puuid and LCSC linkage into c_para.
+    # Without these, the Properties dialog won't show supplier info and
+    # BOM export won't include LCSC part numbers.
+    uuid = comp_data.get("uuid", "")
+    puuid = comp_data.get("puuid", "")
+    if uuid:
+        parts.extend(["uuid", uuid])
+    if puuid:
+        parts.extend(["puuid", puuid])
+    if lcsc_part:
+        parts.extend(["LcscPart", lcsc_part])
+        # Ensure Supplier and SupplierPart are always present
+        if "Supplier" not in api_cpara:
+            parts.extend(["Supplier", "LCSC"])
+        if "Supplier Part" not in api_cpara:
+            parts.extend(["Supplier Part", lcsc_part])
+
+    return "`".join(parts)
+
+
+def build_lib_entry(designator, value, comp_data, canvas_x, canvas_y,
+                    lcsc_part=""):
+    """Build a complete LIB shape string for the schematic."""
+    origin_x = comp_data["origin_x"]
+    origin_y = comp_data["origin_y"]
+
+    # Snap the offset so that pin dots land on the 10px grid.
+    # If the component origin is off-grid (e.g. 405), we adjust canvas_x
+    # so that dx is a multiple of 10, ensuring all pin coordinates snap.
+    dx = snap10(canvas_x - origin_x)
+    dy = snap10(canvas_y - origin_y)
+    # Recalculate actual canvas position from snapped offset
+    canvas_x = origin_x + dx
+    canvas_y = origin_y + dy
+
+    cpara = build_cpara_string(designator, value, comp_data, lcsc_part)
+
+    uuid = comp_data.get("uuid", "")
+    puuid = comp_data.get("puuid", "")
+
+    # Collect all shapes (handle subparts)
+    all_shapes = list(comp_data["shapes"])
+    all_pins = []
+
+    if comp_data.get("subparts"):
+        for sp in comp_data["subparts"]:
+            sp_dx = canvas_x - sp["origin_x"]
+            sp_dy = canvas_y - sp["origin_y"]
+            all_shapes.extend(sp["shapes"])
+            for pin in sp["pins"]:
+                all_pins.append({
+                    "pin_number": pin["pin_number"],
+                    "x": pin["x"] + sp_dx,
+                    "y": pin["y"] + sp_dy,
+                    "rotation": pin["rotation"],
+                    "name": pin["name"],
+                })
+    else:
+        for pin in comp_data["pins"]:
+            all_pins.append({
+                "pin_number": pin["pin_number"],
+                "x": int(pin["x"] + dx),   # NO snap — must match actual LIB pin position
+                "y": int(pin["y"] + dy),    # Symbols may use 5px grid internally
+                "rotation": pin["rotation"],
+                "name": pin["name"],
+            })
+
+    # Offset all shapes and assign globally unique gge IDs.
+    # API shapes reuse IDs like gge26, rep2 — these MUST be unique across the
+    # entire schematic or EasyEDA's footprint checker breaks.
+    offset_shapes = []
+    seen_pins = set()
+    for s in all_shapes:
+        if isinstance(s, str):
+            os = offset_shape(s, dx, dy)
+            # Deduplicate pins from subparts
+            if os.startswith("P~"):
+                pf = os.split("^^")[0].split("~")
+                if len(pf) >= 4:
+                    pk = pf[3]
+                    if pk in seen_pins:
+                        continue
+                    seen_pins.add(pk)
+            # Replace all gge/rep IDs with globally unique ones
+            os = _rename_gge_ids(os)
+            offset_shapes.append(os)
+
     gge = next_gge()
 
-    x_i = int(x)
-    y_i = int(y)
-    path = f"M {x_i-4} {y_i-4} L {x_i+4} {y_i+4} M {x_i+4} {y_i-4} L {x_i-4} {y_i+4}"
-    return f"O~{x_i}~{y_i}~{gge}~{path}~#33cc33~0"
-
-
-# ── Main Schematic Assembly ──────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate an EasyEDA Standard schematic JSON from a netlist"
+    # Add T~P~ (prefix/designator) and T~N~ (name/value) text sub-shapes.
+    # These are required for EasyEDA to display the component reference and value.
+    # Format from real schematics:
+    #   T~{mark}~{x}~{y}~{rot}~{color}~{font}~{size}~{weight}~{style}~
+    #   {baseline}~{type}~{text}~{visible}~{anchor}~{ggeID}~{locked}~{pinpart}
+    #
+    # Place prefix ABOVE and value BELOW the component center
+    # with enough offset to avoid overlapping the component body.
+    cx, cy = int(canvas_x), int(canvas_y)
+    # Adjust label offset based on component size (more pins = bigger body)
+    num_pins = len(comp_data.get("pins", []))
+    if num_pins > 2:
+        # ICs — place labels further above to clear pin text
+        tp_y = cy - 30
+        tn_y = cy - 20
+    else:
+        # Passives — tighter labels
+        tp_y = cy - 16
+        tn_y = cy - 8
+    tp_shape = (
+        f"T~P~{cx + 6}~{tp_y}~0~#000080~Arial~~~~~comment"
+        f"~{designator}~1~start~{next_gge()}~0~pinpart"
     )
-    parser.add_argument(
-        "--netlist", "-n", required=True,
-        help="Input netlist JSON file (components + nets + LCSC parts)"
+    tn_shape = (
+        f"T~N~{cx + 6}~{tn_y}~0~#000080~Arial~~~~~comment"
+        f"~{value}~1~start~{next_gge()}~0~pinpart"
     )
-    parser.add_argument(
-        "--output", "-o", required=True,
-        help="Output schematic JSON file"
+    offset_shapes.append(tp_shape)
+    offset_shapes.append(tn_shape)
+
+    # Build LIB line matching real EasyEDA format (16 fields):
+    # LIB~X~Y~c_para~ROTATION~0~ggeID~field7~field8~0~hash1~yes~yes~hash2~timestamp~hash3
+    #
+    # CRITICAL — Field 7/8 ordering:
+    #   Field 7 = puuid (FOOTPRINT UUID, from API head.puuid)
+    #   Field 8 = uuid  (SYMBOL UUID, from API result.uuid)
+    #
+    # Confirmed by comparing v7 (working) vs v8 (broken) output.
+    # The API's uuid/puuid naming is confusing — what matters is the
+    # position in the LIB header. puuid goes in field 7, uuid in field 8.
+    #
+    # IMPORTANT: Even with correct ordering, JSON import does NOT auto-fetch
+    # footprint geometry. After import, user MUST run:
+    #   Design → Update Components from Library → Select All → Update
+    # See pipeline step 7 in the module docstring.
+    lib_header = (
+        f"LIB~{int(canvas_x)}~{int(canvas_y)}~{cpara}"
+        f"~0~0~{gge}~{puuid}~{uuid}~0~~yes~yes~~~"
     )
-    args = parser.parse_args()
 
-    # Load netlist
-    netlist = json.loads(Path(args.netlist).read_text(encoding="utf-8"))
+    sub_shapes_str = "#@$".join(offset_shapes)
+    lib_str = f"{lib_header}#@${sub_shapes_str}"
 
-    components = netlist.get("components", {})
-    nets = netlist.get("nets", {})
+    return lib_str, all_pins
 
-    print(f"Loaded {len(components)} components, {len(nets)} nets")
 
-    # Fetch API data for unique LCSC parts (with caching)
-    api_cache = {}
-    unique_parts = set(c.get("lcsc") for c in components.values() if c.get("lcsc"))
-    print(f"Fetching {len(unique_parts)} unique LCSC parts from EasyEDA API...")
+# ── Main Generator ────────────────────────────────────────────────────
 
-    for i, lcsc_part in enumerate(sorted(unique_parts)):
-        if not lcsc_part:
-            continue
-        print(f"  {i+1}/{len(unique_parts)}: {lcsc_part}", end="", flush=True)
-        api_cache[lcsc_part] = fetch_component(lcsc_part)
-        if "error" in api_cache[lcsc_part]:
-            print(f" ERROR: {api_cache[lcsc_part]['error']}")
+def generate_schematic(netlist: dict, output_path: str):
+    """Generate an EasyEDA schematic JSON from a netlist."""
+    components = netlist["components"]
+    nets = netlist["nets"]
+
+    print(f"Generating schematic with {len(components)} components and {len(nets)} nets\n")
+
+    # Step 1: Fetch all component symbols
+    print("Step 1: Fetching component symbols from EasyEDA API...")
+    comp_data = {}
+    lcsc_cache = {}
+
+    for i, (ref, info) in enumerate(components.items()):
+        lcsc = info["lcsc"]
+        if lcsc in lcsc_cache:
+            comp_data[ref] = lcsc_cache[lcsc]
+            print(f"  [{i+1}/{len(components)}] {ref} ({lcsc}) — cached")
         else:
-            print(" OK")
-        time.sleep(API_DELAY)
+            print(f"  [{i+1}/{len(components)}] {ref} ({lcsc}) — fetching...")
+            data = fetch_component(lcsc)
+            if "error" in data:
+                print(f"    ERROR: {data['error']}")
+                continue
+            puuid_status = "✓" if data["puuid"] else "✗"
+            print(f"    OK: {data['title']}, {len(data['pins'])} pins, puuid={puuid_status}")
+            lcsc_cache[lcsc] = data
+            comp_data[ref] = data
+            if i < len(components) - 1:
+                time.sleep(API_DELAY)
 
-    # Layout components on grid
-    print("\nPlacing components on grid...")
-    component_order = sorted(components.keys())
-    all_pinouts = {}  # designator → {pin_num → (x, y)}
+    print(f"\nFetched {len(comp_data)} / {len(components)} components\n")
 
-    row = 0
-    col = 0
-    for idx, designator in enumerate(component_order):
-        comp = components[designator]
-        lcsc = comp.get("lcsc", "")
-        api_data = api_cache.get(lcsc, {})
+    # Step 2: Place components on grid — ICs first, then passives below
+    print("Step 2: Placing components on grid...")
+    shape_entries = []
+    pin_map = {}  # {ref: {pin_num: {x, y, rotation}}}
 
-        # Determine spacing based on component type
-        pin_count = len(api_data.get("pins", []))
-        is_ic = pin_count >= 3
+    # Separate ICs (3+ pins) from passives (2 pins)
+    ic_refs = [(ref, data) for ref, data in comp_data.items() if len(data["pins"]) > 2]
+    passive_refs = [(ref, data) for ref, data in comp_data.items() if len(data["pins"]) <= 2]
 
-        if is_ic:
-            spacing_x = GRID_SPACING_IC_X
-            spacing_y = GRID_SPACING_IC_Y
-            cols = GRID_COLS_IC
-        else:
-            spacing_x = GRID_SPACING_PASSIVE_X
-            spacing_y = GRID_SPACING_PASSIVE_Y
-            cols = GRID_COLS_PASSIVE
+    print(f"  ICs: {len(ic_refs)}, Passives: {len(passive_refs)}")
 
-        # Compute grid position
-        if col >= cols:
-            row += 1
-            col = 0
+    # Place ICs first
+    ic_y_start = GRID_START_Y
+    max_ic_y = ic_y_start
+    for i, (ref, data) in enumerate(ic_refs):
+        cx, cy = calculate_grid_position_ic(i, ic_y_start)
+        max_ic_y = max(max_ic_y, cy)
+        value = components[ref].get("value", "")
+        lcsc = components[ref].get("lcsc", "")
+        lib_str, placed_pins = build_lib_entry(ref, value, data, cx, cy, lcsc)
+        shape_entries.append(lib_str)
+        pin_map[ref] = {}
+        for p in placed_pins:
+            pin_map[ref][p["pin_number"]] = p
+        print(f"  {ref} at ({cx}, {cy}) — {len(placed_pins)} pins [IC]")
 
-        x = GRID_START_X + col * spacing_x
-        y = GRID_START_Y + row * spacing_y
+    # Place passives below ICs with tighter spacing
+    passive_y_start = max_ic_y + GRID_SPACING_IC_Y  # gap after ICs
+    for i, (ref, data) in enumerate(passive_refs):
+        cx, cy = calculate_grid_position_passive(i, passive_y_start)
+        value = components[ref].get("value", "")
+        lcsc = components[ref].get("lcsc", "")
+        lib_str, placed_pins = build_lib_entry(ref, value, data, cx, cy, lcsc)
+        shape_entries.append(lib_str)
+        pin_map[ref] = {}
+        for p in placed_pins:
+            pin_map[ref][p["pin_number"]] = p
+        print(f"  {ref} at ({cx}, {cy}) — {len(placed_pins)} pins [passive]")
 
-        # Build LIB entry
-        lib_entry, pinout = build_lib_entry(designator, lcsc, x, y, api_data)
-        if lib_entry:
-            all_pinouts[designator] = pinout
-            print(f"  {designator} at ({x}, {y}): {len(pinout)} pins")
-        else:
-            print(f"  {designator}: SKIPPED (API error or missing data)")
-
-        col += 1
-
-    # Build net wires and flags
-    print(f"\nGenerating {len(nets)} net flags...")
-    net_shapes = []
+    # Step 3: Generate net flags
+    print(f"\nStep 3: Generating net flags ({len(nets)} nets)...")
 
     for net_name, endpoints in nets.items():
-        if not endpoints:
-            continue
+        count = len(endpoints)
+        flag_label = make_flag_label(net_name, count)
 
-        # For each endpoint, draw a wire stub and flag
-        for designator, pin_num in endpoints:
-            if designator not in all_pinouts or pin_num not in all_pinouts[designator]:
-                print(f"  {net_name} pin {designator}.{pin_num}: NOT FOUND (skipped)")
+        placed = 0
+        for endpoint in endpoints:
+            if "." not in endpoint:
+                print(f"  WARNING: Invalid endpoint '{endpoint}' — skipping")
                 continue
 
-            px, py = all_pinouts[designator][pin_num]
+            ref, pin_num = endpoint.rsplit(".", 1)
+            if ref not in pin_map or pin_num not in pin_map[ref]:
+                print(f"  WARNING: {endpoint} not found — skipping")
+                continue
 
-            # Determine flag offset direction based on pin
-            # (simplified: just offset to the right for now)
-            fx = px + FLAG_OFFSET
-            fy = py
+            pin = pin_map[ref][pin_num]
+            px, py, prot = pin["x"], pin["y"], pin["rotation"]
 
-            # Add wire from pin to flag
-            wire = make_wire((px, py), (fx, fy))
-            net_shapes.append(wire)
+            # Flag position (end of stub wire)
+            fx, fy, frot = get_flag_position(px, py, prot)
 
-        # Add net flag (once per net)
-        if endpoints:
-            first_des, first_pin = endpoints[0]
-            if first_des in all_pinouts and first_pin in all_pinouts[first_des]:
-                px, py = all_pinouts[first_des][first_pin]
-                fx = px + FLAG_OFFSET
-                fy = py
-                flag = make_net_flag(net_name, fx, fy, len(endpoints))
-                net_shapes.append(flag)
-                print(f"  {net_name} ({len(endpoints)} endpoints)")
+            # Stub wire from pin to flag
+            shape_entries.append(make_wire(px, py, fx, fy))
 
-    # Mark unconnected pins with NC markers
-    print("\nMarking unconnected pins...")
+            # Net flag — use appropriate symbol type
+            net_lower = net_name.lower()
+            if net_lower in ("gnd", "agnd", "dgnd", "gnd_d", "gnd_a"):
+                shape_entries.append(make_gnd_flag(fx, fy, frot, flag_label))
+            elif net_lower in ("vcc", "vdd", "v+", "vaa", "+5v", "+3.3v", "+9v", "+12v"):
+                shape_entries.append(make_vcc_flag(fx, fy, frot, flag_label))
+            else:
+                shape_entries.append(make_net_flag(fx, fy, frot, flag_label))
+
+            placed += 1
+
+        suffix = f" ({flag_label})" if ":" in flag_label else ""
+        print(f"  {net_name}: {placed}/{count} flags placed{suffix}")
+
+    # Step 3.5: Place NC (No Connect) markers on unconnected pins
+    # Build set of all connected pins from the netlist
+    connected_pins = set()
+    for net_name, endpoints in nets.items():
+        for endpoint in endpoints:
+            connected_pins.add(endpoint)   # e.g. "U2.17"
+
     nc_count = 0
-    for designator, pinout in all_pinouts.items():
-        for pin_num, (px, py) in pinout.items():
-            connected = False
-            for endpoints in nets.values():
-                if (designator, pin_num) in endpoints:
-                    connected = True
-                    break
-            if not connected:
-                nc_marker = make_nc_marker(px, py)
-                net_shapes.append(nc_marker)
+    for ref, pins in pin_map.items():
+        for pin_num, pin in pins.items():
+            endpoint_key = f"{ref}.{pin_num}"
+            if endpoint_key not in connected_pins:
+                # This pin has no net connection — place an NC X marker
+                px, py = pin["x"], pin["y"]
+                shape_entries.append(make_nc_marker(px, py))
                 nc_count += 1
 
-    print(f"  Marked {nc_count} unconnected pins")
+    print(f"\nStep 3.5: Placed {nc_count} NC (No Connect) markers on unconnected pins")
 
-    # Assemble complete component shapes
-    all_shapes = []
+    # Step 3.7: Count SPICE-enabled components for summary
+    spice_count = 0
+    no_spice_refs = []
+    for ref in comp_data:
+        sp, sn = get_spice_info(ref)
+        if sp:
+            spice_count += 1
+        else:
+            no_spice_refs.append(ref)
 
-    # Re-fetch and place all component LIB entries
-    row = 0
-    col = 0
-    for designator in component_order:
-        comp = components[designator]
-        lcsc = comp.get("lcsc", "")
-        api_data = api_cache.get(lcsc, {})
+    print(f"\nStep 3.7: SPICE simulation readiness:")
+    print(f"  SPICE-enabled (passives): {spice_count}")
+    print(f"  No SPICE model (need .subckt): {len(no_spice_refs)}")
+    if no_spice_refs:
+        print(f"    → {', '.join(no_spice_refs)}")
+        print(f"    (These ICs need third-party .subckt models for simulation)")
 
-        pin_count = len(api_data.get("pins", []))
-        is_ic = pin_count >= 3
-        spacing_x = GRID_SPACING_IC_X if is_ic else GRID_SPACING_PASSIVE_X
-        spacing_y = GRID_SPACING_IC_Y if is_ic else GRID_SPACING_PASSIVE_Y
-        cols = GRID_COLS_IC if is_ic else GRID_COLS_PASSIVE
+    # Step 4: Assemble schematic JSON (correct nested structure)
+    print(f"\nStep 4: Assembling schematic JSON ({len(shape_entries)} shapes)...")
 
-        if col >= cols:
-            row += 1
-            col = 0
+    # SPICE directives disabled — setting c_spiceCmd caused "Update from
+    # Library" to resolve SPICE Symbols (PCB footprint graphics) instead of
+    # Schematic Symbols.  Left as None until we find a safe approach.
+    spice_cmd = None
 
-        x = GRID_START_X + col * spacing_x
-        y = GRID_START_Y + row * spacing_y
-
-        lib_entry, _ = build_lib_entry(designator, lcsc, x, y, api_data)
-        if lib_entry:
-            all_shapes.append(lib_entry)
-
-        col += 1
-
-    # Append net shapes
-    all_shapes.extend(net_shapes)
-
-    # Build the complete schematic JSON
     schematic = {
         "editorVersion": "6.5.54",
         "docType": "5",
-        "title": "Generated Schematic",
-        "description": "Auto-generated from netlist",
+        "title": netlist.get("title", "Generated Schematic"),
+        "description": netlist.get("description", "Auto-generated"),
         "colors": {},
         "schematics": [
             {
                 "docType": "1",
-                "title": "Sheet 1",
+                "title": netlist.get("title", "Generated Schematic"),
                 "description": "",
                 "dataStr": {
                     "head": {
@@ -768,38 +1049,72 @@ def main():
                         "editorVersion": "6.5.54",
                         "newgId": True,
                         "c_para": {"Prefix Start": "1"},
-                        "c_spiceCmd": None,
+                        "c_spiceCmd": spice_cmd,
                         "hasIdFlag": True,
                         "x": "0",
                         "y": "0",
                         "importFlag": 0,
-                        "transformList": ""
+                        "transformList": "",
                     },
                     "canvas": "CA~1000~1000~#FFFFFF~yes~#CCCCCC~5~1000~1000~line~5~pixel~5~0~0",
-                    "shape": all_shapes,
-                    "BBox": {"x": 0, "y": 0, "width": 2000, "height": 1600},
-                    "colors": {}
+                    "shape": shape_entries,
+                    "BBox": {
+                        "x": 0, "y": 0,
+                        "width": 2000, "height": 1600,
+                    },
+                    "colors": {},
                 }
             }
-        ]
+        ],
     }
 
-    # Write output
-    Path(args.output).write_text(
+    Path(output_path).write_text(
         json.dumps(schematic, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
 
-    print(f"\nSchematic written to {args.output}")
-    print("\nNEXT STEPS:")
-    print("1. In EasyEDA: File → Open → EasyEDA Source → select the JSON file")
-    print("2. ESSENTIAL: Design → Update Components from Library")
-    print("   → Check the box: 'Check component latest version when open schematic'")
-    print("   → Select All → Check ONLY 'Footprint/Package' column")
-    print("   → Do NOT check 'Symbol' (overwrites schematic symbols!)")
-    print("   → Click 'Update' → Click 'OK' on the warning")
-    print("3. Design → Footprints Verification → Check Footprints (should show 0 issues)")
-    print("4. Design → Convert Schematic to PCB")
+    print(f"\nOutput: {output_path}")
+    print(f"  Components: {len(comp_data)}")
+    print(f"  Nets: {len(nets)}")
+    print(f"  Shapes: {len(shape_entries)}")
+    print(f"\nNext steps:")
+    print(f"  1. Open EasyEDA Standard")
+    print(f"  2. File → Open → EasyEDA Source → select {output_path}")
+    print(f"")
+    print(f"  *** CRITICAL — do this BEFORE anything else: ***")
+    print(f"  3. Design → Update Components from Library")
+    print(f'     ☐ Check "Check component latest version when open schematic"')
+    print(f"     ☐ Select All components in the list")
+    print(f"     ☐ Click Update → OK on the warning")
+    print(f"     (This fetches footprint geometry — without it ALL footprints fail)")
+    print(f"")
+    print(f"  4. Design → Footprints Verification → Check Footprints (should be 0 issues)")
+    print(f"  5. Rearrange components as desired")
+    print(f"  6. Design → Convert Schematic to PCB")
+    print(f"")
+    print(f"  NOTE: SPICE simulation fields are currently disabled to avoid")
+    print(f"  conflicts with 'Update from Library'. SPICE support coming soon.")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate EasyEDA schematic JSON from a structured netlist"
+    )
+    parser.add_argument("--netlist", "-n", required=True, help="Input netlist JSON")
+    parser.add_argument("--output", "-o", required=True, help="Output EasyEDA JSON")
+    parser.add_argument("--delay", "-d", type=float, default=API_DELAY,
+                        help=f"API delay (default: {API_DELAY}s)")
+    args = parser.parse_args()
+
+    netlist = json.loads(Path(args.netlist).read_text(encoding="utf-8"))
+
+    if "components" not in netlist or "nets" not in netlist:
+        print("ERROR: netlist must have 'components' and 'nets' keys", file=sys.stderr)
+        sys.exit(1)
+
+    generate_schematic(netlist, args.output)
 
 
 if __name__ == "__main__":
